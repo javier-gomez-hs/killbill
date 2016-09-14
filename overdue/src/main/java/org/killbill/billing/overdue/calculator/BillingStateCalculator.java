@@ -34,8 +34,13 @@ import org.killbill.billing.invoice.api.Invoice;
 import org.killbill.billing.invoice.api.InvoiceInternalApi;
 import org.killbill.billing.overdue.config.api.BillingState;
 import org.killbill.billing.overdue.config.api.OverdueException;
+import org.killbill.billing.payment.api.Payment;
+import org.killbill.billing.payment.api.PaymentApi;
+import org.killbill.billing.payment.api.PaymentApiException;
 import org.killbill.billing.payment.api.PaymentResponse;
+import org.killbill.billing.payment.api.PaymentTransaction;
 import org.killbill.billing.tag.TagInternalApi;
+import org.killbill.billing.util.callcontext.InternalCallContextFactory;
 import org.killbill.billing.util.tag.Tag;
 import org.killbill.clock.Clock;
 
@@ -45,6 +50,9 @@ public class BillingStateCalculator {
 
     private final InvoiceInternalApi invoiceApi;
     private final TagInternalApi tagApi;
+//    private final PaymentApi paymentApi;
+    private final InternalCallContextFactory internalCallContextFactory;
+
     private final Clock clock;
 
     protected class InvoiceDateComparator implements Comparator<Invoice> {
@@ -61,10 +69,13 @@ public class BillingStateCalculator {
     }
 
     @Inject
-    public BillingStateCalculator(final InvoiceInternalApi invoiceApi, final Clock clock, final TagInternalApi tagApi) {
+    public BillingStateCalculator(final InvoiceInternalApi invoiceApi, final Clock clock, final TagInternalApi tagApi,
+                                  final InternalCallContextFactory internalCallContextFactory) {
         this.invoiceApi = invoiceApi;
         this.clock = clock;
         this.tagApi = tagApi;
+//        this.paymentApi = paymentApi;
+        this.internalCallContextFactory = internalCallContextFactory;
     }
 
     public BillingState calculateBillingState(final ImmutableAccountData account, final InternalTenantContext context) throws OverdueException {
@@ -75,11 +86,24 @@ public class BillingStateCalculator {
         LocalDate dateOfEarliestUnpaidInvoice = null;
         UUID idOfEarliestUnpaidInvoice = null;
         final Invoice invoice = earliest(unpaidInvoices);
+        PaymentResponse responseForLastFailedPayment = null;
+
         if (invoice != null) {
             dateOfEarliestUnpaidInvoice = invoice.getInvoiceDate();
             idOfEarliestUnpaidInvoice = invoice.getId();
+            // TODO:
+//            try {
+//                final Payment earliestFailedPayment =
+//                        paymentApi.getPayment(invoice.getPayments().get(0).getPaymentId(), false, false, null, internalCallContextFactory.createTenantContext(context));
+//                // get latest transaction (the one that failed)
+//                PaymentTransaction earliestFailedTransaction = earliestFailedPayment.getTransactions().get(earliestFailedPayment.getTransactions().size() - 1);
+//                responseForLastFailedPayment = PaymentResponse.fromCode(Integer.valueOf(earliestFailedTransaction.getGatewayErrorCode()).intValue());
+//            } catch (PaymentApiException e) {
+//                e.printStackTrace();
+//            }
+
         }
-        final PaymentResponse responseForLastFailedPayment = PaymentResponse.INSUFFICIENT_FUNDS; //TODO MDW
+//        final PaymentResponse responseForLastFailedPayment = PaymentResponse.INSUFFICIENT_FUNDS; //TODO MDW
         final List<Tag> accountTags = tagApi.getTags(account.getId(), ObjectType.ACCOUNT, context);
         final Tag[] tags = accountTags.toArray(new Tag[accountTags.size()]);
 

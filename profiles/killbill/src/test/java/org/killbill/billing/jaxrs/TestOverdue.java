@@ -22,14 +22,24 @@ import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.List;
 
+import javax.inject.Inject;
+
+import org.killbill.billing.client.KillBillClientException;
 import org.killbill.billing.client.model.Account;
 import org.killbill.billing.client.model.Invoice;
 import org.killbill.billing.client.model.InvoicePayment;
 import org.killbill.billing.client.model.Invoices;
-import org.killbill.billing.client.model.Payment;
 import org.killbill.billing.client.model.Tags;
+import org.killbill.billing.control.plugin.api.PaymentControlPluginApi;
+import org.killbill.billing.osgi.api.OSGIServiceDescriptor;
+import org.killbill.billing.osgi.api.OSGIServiceRegistration;
+import org.killbill.billing.payment.plugin.api.PaymentPluginApi;
+import org.killbill.billing.payment.provider.MockPaymentControlProviderPlugin;
+import org.killbill.billing.payment.provider.MockPaymentProviderPlugin;
 import org.killbill.billing.util.tag.ControlTagType;
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import com.google.common.collect.Ordering;
@@ -38,6 +48,41 @@ import com.google.common.io.Resources;
 import static org.testng.Assert.assertEquals;
 
 public class TestOverdue extends TestJaxrsBase {
+
+    protected OSGIServiceRegistration<PaymentPluginApi> registry;
+    @Inject
+    private OSGIServiceRegistration<PaymentControlPluginApi> controlPluginRegistry;
+    private MockPaymentProviderPlugin mockPaymentProviderPlugin;
+    private MockPaymentControlProviderPlugin mockPaymentControlProviderPlugin;
+
+    @BeforeMethod(groups = "slow")
+    public void beforeMethod() throws Exception {
+        super.beforeMethod();
+        mockPaymentProviderPlugin = (MockPaymentProviderPlugin) registry.getServiceForName(PLUGIN_NAME);
+        mockPaymentControlProviderPlugin = new MockPaymentControlProviderPlugin();
+        controlPluginRegistry.registerService(new OSGIServiceDescriptor() {
+            @Override
+            public String getPluginSymbolicName() {
+                return null;
+            }
+
+            @Override
+            public String getPluginName() {
+                return MockPaymentControlProviderPlugin.PLUGIN_NAME;
+            }
+
+            @Override
+            public String getRegistrationName() {
+                return MockPaymentControlProviderPlugin.PLUGIN_NAME;
+            }
+        }, mockPaymentControlProviderPlugin);
+    }
+
+    @AfterMethod(groups = "slow")
+    public void tearDown() throws Exception {
+        mockPaymentProviderPlugin.clear();
+    }
+
 
     @Test(groups = "slow", description = "Upload and retrieve a per tenant overdue config")
     public void testMultiTenantOverdueConfig() throws Exception {
@@ -76,23 +121,7 @@ public class TestOverdue extends TestJaxrsBase {
         // Post external payments, paying the most recent invoice first: this is to avoid a race condition where
         // a refresh overdue notification kicks in after the first payment, which makes the account goes CLEAR and
         // triggers an AUTO_INVOICE_OFF tag removal (hence adjustment of the other invoices balance).
-        final Invoices invoicesForAccount = killBillClient.getInvoicesForAccount(accountJson.getAccountId());
-        final List<Invoice> mostRecentInvoiceFirst = Ordering.<Invoice>from(new Comparator<Invoice>() {
-            @Override
-            public int compare(final Invoice invoice1, final Invoice invoice2) {
-                return invoice1.getInvoiceDate().compareTo(invoice2.getInvoiceDate());
-            }
-        }).reverse().sortedCopy(invoicesForAccount);
-        for (final Invoice invoice : mostRecentInvoiceFirst) {
-            if (invoice.getBalance().compareTo(BigDecimal.ZERO) > 0) {
-
-                final InvoicePayment invoicePayment = new InvoicePayment();
-                invoicePayment.setPurchasedAmount(invoice.getAmount());
-                invoicePayment.setAccountId(accountJson.getAccountId());
-                invoicePayment.setTargetInvoiceId(invoice.getInvoiceId());
-                killBillClient.createInvoicePayment(invoicePayment, true, createdBy, reason, comment);
-            }
-        }
+        postExternalPayments(accountJson);
 
         // Wait a bit for overdue to pick up the payment events...
         crappyWaitForLackOfProperSynchonization();
@@ -178,5 +207,57 @@ public class TestOverdue extends TestJaxrsBase {
         Assert.assertTrue(killBillClient.getOverdueStateForAccount(accountJson.getAccountId(), requestOptions).getIsClearState());
         // This account is expected to move to OD1 state because it matches with exclusion controlTag defined
         Assert.assertEquals(killBillClient.getOverdueStateForAccount(accountJsonNoTag.getAccountId(), requestOptions).getName(), "OD1");
+    }
+
+    @Test(groups = "slow", description = "Allow overdue condition by response for last failed payment defined in overdue config xml file")
+    public void testOverdueStatusWithResponseForLastFailedPaymentCondition() throws Exception {
+        final String overdueConfigPath = Resources.getResource("overdueWithResponseForLastFailedPaymentCondition.xml").getPath();
+        killBillClient.uploadXMLOverdueConfig(overdueConfigPath, requestOptions);
+
+        // Create an account with a payment method
+        final Account accountJson = createAccountWithPMBundleAndSubscriptionAndWaitForFirstInvoice();
+
+        // We're still clear - see the configuration
+        Assert.assertTrue(killBillClient.getOverdueStateForAccount(accountJson.getAccountId(), requestOptions).getIsClearState());
+
+        // Make next payment fail with error code 119640 (INSUFFICIENT_FUNDS)
+        mockPaymentProviderPlugin.makeNextPaymentFailWithError();
+
+        clock.addMonths(1);
+        crappyWaitForLackOfProperSynchonization();
+
+        // State must be inside OD1
+        Assert.assertEquals(killBillClient.getOverdueStateForAccount(accountJson.getAccountId(), requestOptions).getName(), "OD1");
+
+        // Post external payments, paying the most recent invoice first: this is to avoid a race condition where
+        // a refresh overdue notification kicks in after the first payment, which makes the account goes CLEAR and
+        // triggers an AUTO_INVOICE_OFF tag removal (hence adjustment of the other invoices balance).
+        postExternalPayments(accountJson);
+
+        // Wait a bit for overdue to pick up the payment events...
+        crappyWaitForLackOfProperSynchonization();
+
+        // Verify we're in clear state
+        Assert.assertTrue(killBillClient.getOverdueStateForAccount(accountJson.getAccountId(), requestOptions).getIsClearState());
+    }
+
+    private void postExternalPayments(final Account accountJson) throws KillBillClientException {
+        final Invoices invoicesForAccount = killBillClient.getInvoicesForAccount(accountJson.getAccountId());
+        final List<Invoice> mostRecentInvoiceFirst = Ordering.<Invoice>from(new Comparator<Invoice>() {
+            @Override
+            public int compare(final Invoice invoice1, final Invoice invoice2) {
+                return invoice1.getInvoiceDate().compareTo(invoice2.getInvoiceDate());
+            }
+        }).reverse().sortedCopy(invoicesForAccount);
+        for (final Invoice invoice : mostRecentInvoiceFirst) {
+            if (invoice.getBalance().compareTo(BigDecimal.ZERO) > 0) {
+
+                final InvoicePayment invoicePayment = new InvoicePayment();
+                invoicePayment.setPurchasedAmount(invoice.getAmount());
+                invoicePayment.setAccountId(accountJson.getAccountId());
+                invoicePayment.setTargetInvoiceId(invoice.getInvoiceId());
+                killBillClient.createInvoicePayment(invoicePayment, true, createdBy, reason, comment);
+            }
+        }
     }
 }

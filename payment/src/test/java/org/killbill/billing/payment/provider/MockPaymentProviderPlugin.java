@@ -62,7 +62,7 @@ import com.google.inject.Inject;
  */
 public class MockPaymentProviderPlugin implements PaymentPluginApi {
 
-    public static final String GATEWAY_ERROR_CODE = "gatewayErrorCode";
+    public static final String GATEWAY_ERROR_CODE = "119640";
     public static final String GATEWAY_ERROR = "gatewayError";
 
     public static final String PLUGIN_PROPERTY_PAYMENT_PLUGIN_STATUS_OVERRIDE = "paymentPluginStatusOverride";
